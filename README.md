@@ -1,6 +1,7 @@
 # Project-Water
 
-<Preface: To review the html output, please download all relevant supporting files>
+<Preface: To download html output, please download all relevant supporting files to view with correct formatly>
+<To quickly view the html online, it is hosted on my website at: https://jamesjliang.com/files/project_water.html>
 
 Water is a scarce commodity in many parts of the world. Accurately predicting its availability while reducing the need to routinely check would enable lower costs in monitoring that might be better allocated to creating new water resources. **Therefore, the aim of this project is to create the best machine learning model for predicting the availability of water.**
 
