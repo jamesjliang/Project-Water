@@ -11,3 +11,9 @@ As part of the kaggle competition, the files provided are:
 - sample-submissions.csv: the format of the data that you need to use to make a submission to kaggle.
 
 Note that for the purposes of this competition, the spatial coordinates have been manipulated, as to disguise the actual locations of water points from competitors.
+
+
+## Results of Kaggle Competition
+![image](https://github.com/jamesjliang/Project-Water/assets/161998923/d1bf7390-c9c9-4003-9e54-cc58972cae04)
+
+The results of the fine-tuned Random Forest ends up placing 15th out of 174 contestants, ranking the balanced accuracy of the model in the top 10% of results.
