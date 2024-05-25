@@ -1,0 +1,436 @@
+---
+title: "Project Water"
+author: "James Liang"
+date: "2024-04-26"
+quarto-required: ">=1.3.0"
+format:
+    html:
+        output-file: project_water.html
+        css: "formatting.css"
+editor_options: 
+  chunk_output_type: inline
+---
+
+<!-- Guide to using quarto at https://quarto.org/docs/get-started/hello/rstudio.html -->
+
+# Setup 
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(eval = TRUE,  # Hide all code by default
+                      echo = FALSE,  # Hide code output by default
+                      message = FALSE, 
+                      warning = FALSE,
+                      tidy.opts=list(width.cutoff=60),
+                      tidy=TRUE)
+```
+
+```{r, echo = False}
+#| echo: true
+#| code-fold: true
+#| code-summary: "Load the libraries and avoid conflicts"
+# Load libraries used everywhere
+library(tidyverse)
+library(boot)
+library(kableExtra)
+
+library(tidymodels)
+library(patchwork)
+library(mulgar)
+library(palmerpenguins)
+library(GGally)
+library(tourr)
+library(MASS)
+library(discrim)
+library(classifly)
+library(detourr)
+library(crosstalk)
+library(plotly)
+library(viridis)
+library(colorspace)
+library(conflicted)
+
+library(tidyverse) 
+library(randomForest)
+
+library(vip) # Variable importance
+
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::slice)
+conflicts_prefer(palmerpenguins::penguins)
+conflicts_prefer(viridis::viridis_pal)
+```
+
+
+# Project Synopsis
+
+Water is a scarce commodity in many parts of the world. Accurately predicting its availability while reducing the need to routinely check would enable lower costs in monitoring that might be better allocated to creating new water resources. **Therefore, the aim of this project is to create the best machine learning model for predicting the availability of water.**
+
+This challenge is motivated by an analysis by Julia Silge “Predict availability in #TidyTuesday water sources with random forest models”. The data is downloaded from https://www.waterpointdata.org and represents a subset from a region in Africa. The data has been cleaned, with missing values (small number) imputed, and only reliable variables included.
+
+As part of the kaggle competition, the files provided are:
+
+- water-train.csv: the training set of data
+- water-test.csv: the test set, with no labels, that you need to predict the response variable status_id.
+- sample-submissions.csv: the format of the data that you need to use to make a submission to kaggle.
+
+Note that for the purposes of this competition, the spatial coordinates have been manipulated, as to disguise the actual locations of water points from competitors.
+
+
+# Exploratory Data Analysis
+
+### Response Variable
+
+To understand the data that we are working with, we will consider the distribution of our response variables, *status_id*, where *y* denotes the existence of water, and *n* denotes the absence of water.
+
+```{r}
+water <- read_csv("data/water_train.csv") |> 
+  mutate(status_id = factor(status_id))
+
+water |>
+  group_by(status_id) |>
+  summarise(percentage = round(n()/nrow(water) * 100, 2)) |>
+  ggplot(aes(x = status_id, y = percentage, fill = status_id)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(percentage, "%")), 
+            vjust = -0.5, size = 4) +
+  labs(title = "Distribution of status_id", x = "Flag", y = "Percentage") +
+  xlab("status_id") + 
+  ylim(0, 100)
+```
+One key point to note is the unbalanced nature of the data. This is an important aspect of the data to note, and may influence the way that we tune the variables.
+
+### Explanatory Variables
+Next, we examine the explanatory variables that we can use to model the data, and gain an udnerstanding them.
+
+```{r}
+library(gridExtra)
+# Histogram
+hist_plot <- water |>
+  ggplot(aes(install_year)) +
+  geom_histogram() +
+  xlim(1980, 2025) +
+  ggtitle("Water pumps installed over years")
+
+# Distribution of Installation Years
+dist_plot <- water |>
+  mutate(flag = ifelse(water$install_year == 2007, 2007, "other")) |>
+  group_by(flag) |>
+  summarise(percentage = round(n()/nrow(water) * 100, 2)) |>
+  ggplot(aes(x = flag, y = percentage, fill = flag)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(percentage, "%")), 
+            vjust = -0.5, size = 3) +
+  labs(title = "Pumps installed in 2007 v Others", x = "Flag", y = "Percentage") +
+  xlab("Installation Year") + 
+  ylim(0, 60)
+
+# Arrange the plots side by side
+grid.arrange(hist_plot, dist_plot, ncol = 2)
+```
+Interestingly, from a time period between 1980 to 2025, almost half of all water pumps were installed in 2007. This may have been due to policy reforms at the time, or errors in data entry. Regardless, some level of scrutiny should be held. In the case of constructing a purely predictive model, by observation, this feature may improve predictive capabilities, as 2007 records (especially when there may have been policy changes) may differ from water pumps installed in other years. However, to truly evaluate variable importance, we would need to actually construct the models and extract the importance. (For example, a mean decrease gini value from a random forest)
+
+So, what about the actual type of water pump used? It would be interesting to evaluate whether the type of water pump used influences water availability or not.
+
+```{r}
+water |>
+  group_by(water_tech_category) |>
+  summarise(percentage = round(n()/nrow(water) * 100, 2)) |>
+  ggplot(aes(x = water_tech_category, y = percentage, fill = water_tech_category)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(percentage, "%")), 
+            vjust = -0.5, size = 4) +
+  labs(title = "Distribution of water_tech_category", x = "Flag", y = "Percentage") +
+  xlab("water_tech_category") + 
+  ylim(0, 100)
+```
+
+#### Geospatial Analysis
+Next, knowing that we are working with water availability in a certain region of the world, it would be interesting to use some basic geospatial analytics to determine whether there are particular areas with an abundance of water or not.
+
+```{r}
+water |>
+  ggplot(aes(x = lat, y = lon, col = status_id, alpha = 0.01)) +
+  geom_point() +
+  facet_wrap(~status_id)
+```
+An initial plot shows an almost identical distribution between areas with and without water. Does this mean that there is no relation between location and water availability? 
+
+*Not quite.* What would be worth examining, is where the points might be concentrated with a density plot. For example, consider whether a particular region is particularly dry, and may have scarcer sources of water?
+
+```{r}
+# Load the leaflet package
+library(leaflet)
+
+ggplot(water, aes(x = lon, y = lat)) +
+  geom_density2d() +
+  stat_density2d(aes(fill = ..level..), geom = "polygon") +
+  scale_fill_viridis_c() +
+  facet_wrap(~status_id) +
+  theme_minimal() +
+  labs(title = "Density Plot of Data Concentration")
+```
+Using a density plot, we indeed begin to see the influences of location on water availability. In particular, it appears that regions where water is more scarce, tends to exist in the more Northern Regions. On the other hand, regions where water seems more abundant, is concentrated towards the Southern regions. This separation appears to suggest that latitude and logitude, will indeed, be quite important in helping us to predict water availability. 
+
+For reference on a real world map, water availability and their respective densities can be seen in the leaflet plot below.
+```{r}
+library(leaflet.extras)
+
+# Define color palette
+pal <- colorFactor(c("red", "blue"), domain = water$status_id)
+
+# Create the leaflet map
+map <- leaflet(water) %>%
+  addTiles() %>%  # Add default OpenStreetMap map tiles
+  addCircleMarkers(~lon, ~lat, color = ~pal(status_id), 
+                   fillOpacity = 0.01, radius = 5, 
+                   stroke = FALSE, 
+                   fillColor = ~pal(status_id)) %>%
+  addLegend(pal = pal, values = ~status_id, title = "Category")
+
+# Print the map
+map
+
+```
+
+
+
+# Creating the Predictive Models
+
+### Pre-processing
+
+- The variable *report_date* is given as a date object, so we will extract the year and month using the lubridate package. 
+
+- Missing values have been imputed.
+
+- Only reliable variables are currently being used in the dataset. 
+
+- Standardisation will be applied to the data set for running algorithms such as: Linear Discriminant Analysis (LDA) or Logistic Regression. It will not be applied when working with tree based classifiers such as: Random Forest, Decision Trees, Boosted Tree.
+
+```{r, eval = TRUE, echo = TRUE}
+library(lubridate)
+library(kableExtra)
+
+## Extract out the date object.
+water <- read_csv("data/water_train.csv") |> 
+  mutate(status_id = factor(status_id)) 
+
+water <- water |>
+          bind_cols(report_year = year(ymd(water$report_date)),     # Get the report year
+                          report_month = as.character(month(ymd(water$report_date))),
+                          report_day = as.character(wday(ymd(water$report_date)))
+                    ) |>
+          select(-report_date)
+
+
+## Repeat for testing
+water_test <- read_csv("data/water_test.csv")
+
+water_test <- water_test |>
+          bind_cols(report_year = year(ymd(water_test$report_date)),  # Get the report year
+                          report_month = as.character(month(ymd(water_test$report_date))),
+                          report_day = as.character(wday(ymd(water_test$report_date)))
+                    ) |>
+          select(-report_date)
+
+```
+
+### Experimentation with various models
+
+For experimentation of models, I will need a method for testing the accuracies of my model. To this end, I will create a training and testing dataset of my own, using stratified sampling to ensure a balanced train and test split.
+
+```{r, eval = TRUE, echo = TRUE}
+water_split <- initial_split(water, strata = status_id)
+s.water_train <- training(water_split) 
+s.water_test <- testing(water_split) 
+```
+
+```{r, eval = TRUE, echo = TRUE}
+set.seed(1234)
+
+# Boosting
+set.seed(1110)
+bt_spec <- boost_tree() |>
+  set_mode("classification") |>
+  set_engine("xgboost")
+p_fit_bt <- bt_spec |> 
+  fit(status_id ~ ., data = s.water_train[,-1])
+
+# Default Random Forest
+rf_spec <- rand_forest() |>
+  set_mode("classification") |>
+  set_engine("randomForest")
+p_fit_rf <- rf_spec |> 
+  fit(status_id ~ ., data = s.water_train[,-1])
+```
+
+```{r, eval = TRUE, echo = TRUE}
+set.seed(1234)
+# Standardise the data
+water_std <- water |>
+    mutate_if(is.numeric, function(x) (x-mean(x))/sd(x)) |>
+    mutate(status_id = factor(status_id))
+
+water_std_split <- initial_split(water_std, strata = status_id)
+s.water_std_train <- training(water_std_split) 
+s.water_std_test <- testing(water_std_split) 
+
+# Fitting LDA
+lda_spec <- discrim_linear() |>
+  set_mode("classification") |>
+  set_engine("MASS", prior = c(1/2, 1/2)) 
+lda_fit <- lda_spec |> 
+  fit(status_id ~ ., data = s.water_std_train[,-1])
+
+# Fitting Logistic Regression 
+logistic_spec <- logistic_reg() |> 
+  set_engine("glm") |> 
+  set_mode("classification") |> 
+  translate()
+log_fit <- logistic_spec |> 
+  fit(status_id ~ ., data = s.water_std_train[,-1])
+```
+
+```{r, eval = TRUE, echo = TRUE}
+# LDA Model
+lda_prob <- s.water_std_test |>
+  mutate(pred_prob = predict(lda_fit$fit, s.water_std_test)$posterior[,1]) 
+
+d_roc1 <- roc_curve(lda_prob, status_id, pred_prob) |> 
+  mutate(model = "LDA")
+
+# Logistic Regression 
+logistic_prob <- predict(log_fit$fit, newdata = s.water_std_test, type = "response")
+
+logistic_prob <- s.water_std_test %>%
+                  mutate(pred_prob = 1-logistic_prob)
+d_roc2 <- roc_curve(logistic_prob, status_id, pred_prob) |> 
+  mutate(model = "Logistic Regression")
+
+# Boosting
+boosted_prob <- s.water_test %>% 
+                mutate(pred_prob = predict(p_fit_bt, s.water_test, type="prob")$.pred_n)
+d_roc3 <- roc_curve(boosted_prob, status_id, pred_prob) |> 
+  mutate(model = "Boosted Tree") 
+
+# Random Forest
+forest_prob <- s.water_test %>% 
+                mutate(pred_prob = predict(p_fit_rf$fit, s.water_test, type="prob")[,1])
+d_roc4 <- roc_curve(forest_prob, status_id, pred_prob) |> 
+  mutate(model = "Default Forest")
+
+d_roc <- bind_rows(d_roc1, d_roc2, d_roc3, d_roc4) 
+ggplot(d_roc, aes(x=1-specificity, y=sensitivity, colour=model)) + 
+  geom_path() + 
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = 'grey') +
+  ggtitle("ROC Curves from fitting ML models")
+```
+
+One of the ways I decided on which model to fit, was to compare the ROC curves of each default model, to set a baseline for which model appears to be performing best. Observe that the Default Random Forest has the highest sensitivity for each value of 1-specificity. This indicates to us that, without fine-tuning, the random forest is currently the best performing model, with the highest true positive rate for each false negative rate.
+
+Note that this was relatively surprising. Since there are not distinct separations in the data that we are working with, my initial assumption was that the boosted tree model would perform quite well, especially given that the boosted tree uses a learning parameter to be able to classify *difficult* observations.
+
+In this case, in future experimentation, it might be worth conducting a comparison of models, after fine-tuning to see if the results would differ. Fine Tuning could be conducted via:
+
+1. Using the tidy model framework to fit the models, up the hyperparameters  to tune for each model. For example, for the random forest, it was 'trees', which was the number of trees contained in the ensemble, and 'mtry', which was the number of predictors that would be randomly sampled at each split when creating the tree models. 
+
+2. One can use the default 10 fold cross validation to setup training sets to tune on.
+
+3. Create a grid of values, of each hyper parameter value to experiment with. 
+
+4. Finally, return the values of the hyperparameters that give the highest average accuracy and plot a ROC curve.
+
+Of course, the caveat is that on such a large data set, it would be extremely computationally expensive and time consuming to train so many models. Therefore, for the purposes of this competition, I will simply use the simpler alternative, of tuning the best default model based on the ROC curve, which is the Random Forest.
+
+
+## Final Model
+
+The following code is the final model of the Random Forest that was tuned, and submitted to the competition.
+
+Note that the final model was trained on the entire training set. In this instance, I decided to show the accuracy measures (and balanced accuracies due to the imbalance of the response variables), so I used s.water_train and s.water_test for demonstrative purposes. 
+
+For Tuning, I used class weights to adjust the inbalance in response variables, and set different cutoff values for confidence prediction.
+
+```{r, eval = TRUE, echo = TRUE}
+library(tidyverse) 
+library(randomForest)
+
+n_wt <- ifelse(s.water_train$status_id == "n", 1.8, 1)
+k = 0.5
+
+set.seed(15)
+rf_fit <- randomForest(status_id ~ ., 
+                       data = s.water_train[,-1], 
+                       weights=n_wt,
+                       cutoff = c(k, 1-k)
+                       ) 
+rf_fit
+```
+
+```{r, eval = TRUE, echo = TRUE}
+p_ts_pred <- s.water_test |>
+  mutate(pstatus_id = predict(rf_fit, s.water_test, type="response")) |>
+  bind_cols(predict(rf_fit, s.water_test, type="prob"))
+
+p_ts_pred |>
+  count(status_id, pstatus_id) |>
+  group_by(status_id) |>
+  mutate(Accuracy = n[status_id==pstatus_id]/sum(n)) |>
+  pivot_wider(names_from = "pstatus_id", 
+              values_from = n, 
+              values_fill = 0) |>
+  select(status_id, n, y, Accuracy) |>
+  # kable styling
+  kable(caption = "Tuned Random Forest - Confusion matrix", digits=3, align="r") |>
+  kable_styling(full_width = T)
+
+# Accuracy Measures
+tibble(
+  accuracy = accuracy(p_ts_pred, status_id, pstatus_id)$.estimate,
+  bal_accuracy = bal_accuracy(p_ts_pred, status_id, pstatus_id)$.estimate) |>
+  # kable styling
+  kable(caption = "Tuned Random Forest - Accuracies", digits=3, align="r") |>
+  kable_styling(full_width = T)
+```
+
+```{r, eval = TRUE, echo = TRUE}
+# Create final model
+##n_wt <- ifelse(water$status_id == "n", 1.8, 1)
+##k = 0.6
+
+##set.seed(15)
+##rf_fit <- randomForest(status_id ~ ., 
+##                       data = s.water_train[,-1], 
+##                       weights=n_wt,
+##                       cutoff = c(k, 1-k)
+##                       ) 
+##rf_fit
+
+# Write test set predictions into a CSV file.
+##water_ts_pred <- water_test |> 
+##  bind_cols(predict(rf_fit, newdata=water_test, type="prob")) |> 
+##  mutate(pstatus_id = predict(rf_fit, newdata=water_test, 
+##    type="response")) 
+
+# write_csv(water_ts_pred[,c("ID", "pstatus_id")], file="final_test.csv")
+```
+
+
+# Conclusions and Remarks
+
+```{r}
+kaggle_ranks <- read.csv("data/kaggle-final-rankings.csv")
+
+kaggle_ranks |>
+  ggplot(aes(Score)) +
+  geom_density(color = "black", size = 1) + # Density plot for smooth curve
+  geom_vline(xintercept = 0.72913, color = "red", linetype = "dashed", size = 1) + # Vertical line
+  annotate("text", x = 0.736, y = 50, label = "Result", vjust = -0.5, color = "red") + # Annotated text
+  labs(title = "Kaggle Scores with Density Plot",
+       x = "Balanced Accuracy",
+       y = "Density")
+```
+
+So how does the model perform in this kaggle competition? The results of the fine-tuned Random Forest ends up placing 15th out of 174 contestants, ranking the balanced accuracy of the model in the top 10% of results.
+
+
